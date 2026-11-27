@@ -32,10 +32,12 @@ def log_browser_error(error):
         category = "browser_executable_missing"
     elif "Host system is missing dependencies" in first_line:
         category = "browser_dependencies_missing"
+    operation_name = operation.group(0) if operation else "unknown"
     print(
-        f"DHL Playwright: operation={operation.group(0) if operation else 'unknown'} "
+        f"DHL Playwright: operation={operation_name} "
         f"cause={category}", file=sys.stderr, flush=True,
     )
+    return {"operation": operation_name, "cause": category}
 
 
 def application(environ, start_response):
@@ -70,11 +72,9 @@ def application(environ, start_response):
     try:
         result = track(number)
     except BrowserTimeout as error:
-        log_browser_error(error)
-        return send("504 Gateway Timeout", {"error": "browser_timeout"})
+        return send("504 Gateway Timeout", {"error": "browser_timeout", **log_browser_error(error)})
     except BrowserError as error:
-        log_browser_error(error)
-        return send("502 Bad Gateway", {"error": "browser_error"})
+        return send("502 Bad Gateway", {"error": "browser_error", **log_browser_error(error)})
     finally:
         TRACK_LOCK.release()
 
