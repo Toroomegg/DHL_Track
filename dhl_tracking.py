@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTimeout, sync_playwright
 
@@ -31,6 +32,40 @@ def read_tab_panel(page, tab):
             .map(link => ({text: text(link), url: link.href}));
         return {text: text(panel), rows, links};
     }""")
+
+
+def observe_dhl_requests(page):
+    calls = {}
+
+    def on_request(request):
+        host = urlsplit(request.url).hostname or ""
+        if (request.resource_type in ("fetch", "xhr")
+                and (host == "dhl.com" or host.endswith(".dhl.com"))
+                and len(calls) < 50):
+            calls[request] = "pending"
+
+    def on_response(response):
+        if response.request in calls:
+            calls[response.request] = response.status
+
+    def on_failure(request):
+        if request in calls:
+            failure = request.failure or ""
+            code = re.search(r"(?:NS_ERROR|ERR)_[A-Z0-9_]+", failure)
+            calls[request] = code.group(0) if code else "request_failed"
+
+    page.on("request", on_request)
+    page.on("response", on_response)
+    page.on("requestfailed", on_failure)
+
+    def snapshot():
+        counts = {}
+        for result in calls.values():
+            key = str(result)
+            counts[key] = counts.get(key, 0) + 1
+        return {"observed_requests": len(calls), "results": counts}
+
+    return snapshot
 
 
 def submit_tracking(page, tracking_number):
@@ -76,6 +111,7 @@ def track(tracking_number, channel=None):
             overlay.wait_for(state="hidden", timeout=8_000)
             stage = "submit_tracking"
             marker = page.get_by_text(SHIPMENT_MARKER).first
+            network_snapshot = observe_dhl_requests(page)
             submit_tracking(page, tracking_number)
             track_clicked = True
 
@@ -91,7 +127,12 @@ def track(tracking_number, channel=None):
                 alerts = page.get_by_role("alert").all_inner_texts()
                 if any(ERROR_TEXT.search(alert) for alert in alerts):
                     return {"outcome": "upstream_message", "message": " ".join(alerts)}
-                return {"outcome": "tracking_result_unavailable", "stage": stage, "track_clicked": track_clicked}
+                return {
+                    "outcome": "tracking_result_unavailable",
+                    "stage": stage,
+                    "track_clicked": track_clicked,
+                    "dhl_network": network_snapshot(),
+                }
 
             stage = "read_shipment_details"
             details_tab = page.get_by_role("tab", name=re.compile("貨物詳情|Shipment Details", re.I))
