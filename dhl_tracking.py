@@ -14,7 +14,10 @@ CHALLENGE = re.compile(r"verify you are human|access denied|驗證您是人類|c
 
 def track(tracking_number, channel=None):
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel=channel)
+        browser = (
+            playwright.chromium.launch(channel=channel)
+            if channel else playwright.firefox.launch()
+        )
         try:
             page = browser.new_page(locale="zh-TW")
             page.set_default_timeout(8_000)
