@@ -70,7 +70,7 @@ def track(tracking_number, channel=None):
                 alerts = page.get_by_role("alert").all_inner_texts()
                 if any(ERROR_TEXT.search(alert) for alert in alerts):
                     return {"outcome": "upstream_message", "message": " ".join(alerts)}
-                return {"outcome": "tracking_result_unavailable"}
+                return {"outcome": "tracking_result_unavailable", "stage": stage}
 
             stage = "read_shipment_details"
             details_tab = page.get_by_role("tab", name=re.compile("貨物詳情|Shipment Details", re.I))
