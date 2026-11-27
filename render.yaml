@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: dhl-tracking-poc
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DHL_TRACK_TOKEN
+        sync: false
