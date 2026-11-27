@@ -12,6 +12,15 @@ ERROR_TEXT = re.compile(
 CHALLENGE = re.compile(r"verify you are human|access denied|驗證您是人類|captcha", re.I)
 
 
+def read_tab_panel(page, tab, *, select=False):
+    if select:
+        tab.click()
+    panel_id = tab.get_attribute("aria-controls")
+    panel = page.locator(f'[id="{panel_id}"]')
+    panel.wait_for()
+    return panel.inner_text().strip()
+
+
 def track(tracking_number, channel=None):
     with sync_playwright() as playwright:
         browser = (
@@ -28,7 +37,7 @@ def track(tracking_number, channel=None):
             if response and response.status in (403, 429):
                 return {"outcome": "upstream_blocked"}
 
-            cookies = page.get_by_role("button", name=re.compile("僅嚴格必要|Strictly Necessary"))
+            cookies = page.locator("#onetrust-reject-all-handler")
             if cookies.is_visible():
                 cookies.click(timeout=3_000)
 
@@ -50,9 +59,12 @@ def track(tracking_number, channel=None):
                     return {"outcome": "upstream_message", "message": " ".join(alerts)}
                 return {"outcome": "tracking_result_unavailable"}
 
+            # The result view can display its own cookie banner after the search.
+            if cookies.is_visible():
+                cookies.click(timeout=4_000)
+
             details_tab = page.get_by_role("tab", name=re.compile("貨物詳情|Shipment Details", re.I))
-            panel = details_tab.get_attribute("aria-controls")
-            details = page.locator(f'[id="{panel}"]').inner_text() if panel else ""
+            details = read_tab_panel(page, details_tab)
             status_heading = page.locator(
                 'h2[id^="duil320-dhl-headline-"]'
             ).filter(visible=True).first
@@ -66,15 +78,11 @@ def track(tracking_number, channel=None):
                 return '';
             }""")
             timeline = page.get_by_role("tab", name=re.compile("貨物時間線|Shipment Timeline", re.I))
-            timeline.click()
-            timeline_panel = page.get_by_role("tabpanel").filter(visible=True)
-            timeline_panel.wait_for()
-            timeline_text = timeline_panel.inner_text()
+            timeline_text = read_tab_panel(page, timeline, select=True)
             event_log = page.get_by_role("tab", name=re.compile("事件日誌|Event Log", re.I))
             event_text = ""
             if event_log.is_visible():
-                event_log.click()
-                event_text = page.get_by_role("tabpanel").filter(visible=True).inner_text()
+                event_text = read_tab_panel(page, event_log, select=True)
 
             return {
                 "outcome": "ok",
