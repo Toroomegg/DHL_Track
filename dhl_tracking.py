@@ -33,6 +33,18 @@ def read_tab_panel(page, tab):
     }""")
 
 
+def submit_tracking(page, tracking_number):
+    field = page.get_by_role(
+        "textbox", name=re.compile(r"輸入您的追蹤碼|Enter your tracking", re.I)
+    ).filter(visible=True).first
+    field.fill(tracking_number, timeout=12_000)
+    button = page.get_by_role(
+        "button", name=re.compile(r"^(追蹤|Track)$", re.I)
+    ).filter(visible=True).first
+    # Playwright waits until the site's input validation enables the button.
+    button.click(timeout=12_000)
+
+
 def track(tracking_number, channel=None):
     with sync_playwright() as playwright:
         browser = (
@@ -41,6 +53,7 @@ def track(tracking_number, channel=None):
         )
         stage = "open_tracking_page"
         overlay = None
+        track_clicked = False
         try:
             page = browser.new_page(locale="zh-TW", viewport={"width": 1440, "height": 1000})
             cookies = page.locator("#onetrust-reject-all-handler").filter(visible=True).first
@@ -53,7 +66,7 @@ def track(tracking_number, channel=None):
             page.add_locator_handler(cookies, dismiss_cookies, times=2, no_wait_after=True)
             page.set_default_timeout(8_000)
             response = page.goto(
-                f"{TRACKING_URL}?tracking-id={tracking_number}",
+                TRACKING_URL,
                 wait_until="domcontentloaded", timeout=25_000,
             )
             if response and response.status in (403, 429):
@@ -63,12 +76,8 @@ def track(tracking_number, channel=None):
             overlay.wait_for(state="hidden", timeout=8_000)
             stage = "submit_tracking"
             marker = page.get_by_text(SHIPMENT_MARKER).first
-            track_button = page.get_by_role(
-                "button", name=re.compile(r"^(追蹤|Track)$", re.I)
-            ).filter(visible=True).first
-            marker.or_(track_button).first.wait_for(timeout=10_000)
-            if not marker.is_visible() and track_button.is_enabled():
-                track_button.click(timeout=12_000)
+            submit_tracking(page, tracking_number)
+            track_clicked = True
 
             stage = "wait_for_tracking_result"
             try:
@@ -82,7 +91,7 @@ def track(tracking_number, channel=None):
                 alerts = page.get_by_role("alert").all_inner_texts()
                 if any(ERROR_TEXT.search(alert) for alert in alerts):
                     return {"outcome": "upstream_message", "message": " ".join(alerts)}
-                return {"outcome": "tracking_result_unavailable", "stage": stage}
+                return {"outcome": "tracking_result_unavailable", "stage": stage, "track_clicked": track_clicked}
 
             stage = "read_shipment_details"
             details_tab = page.get_by_role("tab", name=re.compile("貨物詳情|Shipment Details", re.I))
@@ -110,6 +119,7 @@ def track(tracking_number, channel=None):
                 "outcome": "ok",
                 "tracking_number": tracking_number,
                 "status": status,
+                "track_clicked": track_clicked,
                 "shipment_summary": summary.split("\n貨物詳情", 1)[0].strip(),
                 "shipment_details": details["text"],
                 "timeline": timeline_details["text"],
@@ -123,7 +133,8 @@ def track(tracking_number, channel=None):
             }
         except BrowserError as error:
             if isinstance(error, BrowserTimeout) and overlay is not None and overlay.is_visible():
-                return {"outcome": "upstream_blocked", "stage": stage, "cause": "site_overlay"}
+                return {"outcome": "upstream_blocked", "stage": stage,
+                        "cause": "site_overlay", "track_clicked": track_clicked}
             error.tracking_stage = stage
             raise
         finally:
