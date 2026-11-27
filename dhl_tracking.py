@@ -12,13 +12,25 @@ ERROR_TEXT = re.compile(
 CHALLENGE = re.compile(r"verify you are human|access denied|驗證您是人類|captcha", re.I)
 
 
-def read_tab_panel(page, tab, *, select=False):
-    if select:
+def read_tab_panel(page, tab):
+    if tab.get_attribute("aria-selected") != "true":
         tab.click()
     panel_id = tab.get_attribute("aria-controls")
     panel = page.locator(f'[id="{panel_id}"]')
     panel.wait_for()
-    return panel.inner_text().strip()
+    return panel.evaluate("""panel => {
+        const visible = el => el.getClientRects().length > 0 &&
+            getComputedStyle(el).visibility === 'visible';
+        const text = el => el.innerText.trim();
+        const rows = [...panel.querySelectorAll('tr, [role="row"]')]
+            .filter(visible)
+            .map(row => [...row.children].filter(visible).map(text))
+            .filter(cells => cells.length);
+        const links = [...panel.querySelectorAll('a[href]')]
+            .filter(link => visible(link) && /^https?:/.test(link.href))
+            .map(link => ({text: text(link), url: link.href}));
+        return {text: text(panel), rows, links};
+    }""")
 
 
 def track(tracking_number, channel=None):
@@ -31,14 +43,14 @@ def track(tracking_number, channel=None):
         overlay = None
         try:
             page = browser.new_page(locale="zh-TW", viewport={"width": 1440, "height": 1000})
-            cookies = page.locator("#onetrust-reject-all-handler")
-            overlay = page.locator("#sec-overlay")
+            cookies = page.locator("#onetrust-reject-all-handler").filter(visible=True).first
+            overlay = page.locator("#sec-overlay").filter(visible=True).first
 
             def dismiss_cookies(button):
                 if not overlay.is_visible():
                     button.click(timeout=4_000)
 
-            page.add_locator_handler(cookies, dismiss_cookies, no_wait_after=True)
+            page.add_locator_handler(cookies, dismiss_cookies, times=2, no_wait_after=True)
             page.set_default_timeout(8_000)
             response = page.goto(
                 f"{TRACKING_URL}?tracking-id={tracking_number}",
@@ -89,21 +101,24 @@ def track(tracking_number, channel=None):
             }""")
             stage = "read_timeline"
             timeline = page.get_by_role("tab", name=re.compile("貨物時間線|Shipment Timeline", re.I))
-            timeline_text = read_tab_panel(page, timeline, select=True)
+            timeline_details = read_tab_panel(page, timeline)
             stage = "read_event_log"
             event_log = page.get_by_role("tab", name=re.compile("事件日誌|Event Log", re.I))
-            event_text = ""
-            if event_log.is_visible():
-                event_text = read_tab_panel(page, event_log, select=True)
+            events = read_tab_panel(page, event_log)
 
             return {
                 "outcome": "ok",
                 "tracking_number": tracking_number,
                 "status": status,
                 "shipment_summary": summary.split("\n貨物詳情", 1)[0].strip(),
-                "shipment_details": details.strip(),
-                "timeline": timeline_text.strip(),
-                "event_log": event_text.strip(),
+                "shipment_details": details["text"],
+                "timeline": timeline_details["text"],
+                "event_log": events["text"],
+                "tabs": {
+                    "shipment_details": details,
+                    "shipment_timeline": timeline_details,
+                    "event_log": events,
+                },
                 "source_url": f"{TRACKING_URL}?tracking-id={tracking_number}",
             }
         except BrowserError as error:
