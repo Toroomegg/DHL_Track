@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTimeout, sync_playwright
 
 TRACKING_URL = "https://www.dhl.com/tw-zh/home/tracking.html"
-SHIPMENT_MARKER = re.compile(r"處理此貨件由|Handled by", re.I)
+DETAILS_TAB = re.compile(r"貨物詳情|Shipment Details", re.I)
 ERROR_TEXT = re.compile(
     r"查無|找不到|無法追蹤|請稍後|no results|not found|no tracking|try again later", re.I
 )
@@ -37,6 +37,7 @@ def read_tab_panel(page, tab):
 def observe_dhl_requests(page):
     calls = {}
     tracked = {}
+    preconditions = []
 
     def on_request(request):
         url = urlsplit(request.url)
@@ -51,6 +52,14 @@ def observe_dhl_requests(page):
     def on_response(response):
         if response.request in calls:
             calls[response.request] = response.status
+            if response.status == 428:
+                url = urlsplit(response.url)
+                preconditions.append({
+                    "host": url.hostname,
+                    "tracking_path": response.request in tracked,
+                    "security_path": bool(re.search(r"security|challenge|captcha|akam", url.path, re.I)),
+                    "content_type": response.headers.get("content-type", "").split(";", 1)[0],
+                })
 
     def on_failure(request):
         if request in calls:
@@ -70,6 +79,7 @@ def observe_dhl_requests(page):
         return {
             "observed_requests": len(calls),
             "results": counts,
+            "preconditions": preconditions,
             "tracking_path_responses": [
                 {"method": method, "result": calls[request]}
                 for request, method in tracked.items()
@@ -121,14 +131,14 @@ def track(tracking_number, channel=None):
             stage = "wait_for_page_overlay"
             overlay.wait_for(state="hidden", timeout=8_000)
             stage = "submit_tracking"
-            marker = page.get_by_text(SHIPMENT_MARKER).first
+            details_tab = page.get_by_role("tab", name=DETAILS_TAB).filter(visible=True).first
             network_snapshot = observe_dhl_requests(page)
             submit_tracking(page, tracking_number)
             track_clicked = True
 
             stage = "wait_for_tracking_result"
             try:
-                marker.wait_for(timeout=22_000)
+                details_tab.wait_for(timeout=22_000)
             except BrowserTimeout:
                 main = page.get_by_role("main")
                 visible = main.inner_text() if main.count() else page.locator("body").inner_text()
@@ -143,16 +153,17 @@ def track(tracking_number, channel=None):
                     "stage": stage,
                     "track_clicked": track_clicked,
                     "dhl_network": network_snapshot(),
+                    "visible_tabs": page.get_by_role("tab").filter(visible=True).count(),
+                    "site_overlay_visible": overlay.is_visible(),
                 }
 
             stage = "read_shipment_details"
-            details_tab = page.get_by_role("tab", name=re.compile("貨物詳情|Shipment Details", re.I))
             details = read_tab_panel(page, details_tab)
             status_heading = page.locator(
                 'h2[id^="duil320-dhl-headline-"]'
             ).filter(visible=True).first
             status = status_heading.inner_text()
-            summary = marker.evaluate("""element => {
+            summary = details_tab.evaluate("""element => {
                 let section = element;
                 for (let i = 0; section && i < 9; i++, section = section.parentElement) {
                     if (section.querySelector('h2') && section.querySelector('[role="tablist"]'))
@@ -172,7 +183,7 @@ def track(tracking_number, channel=None):
                 "tracking_number": tracking_number,
                 "status": status,
                 "track_clicked": track_clicked,
-                "shipment_summary": summary.split("\n貨物詳情", 1)[0].strip(),
+                "shipment_summary": re.split(r"\n(?:貨物詳情|Shipment Details)", summary, maxsplit=1)[0].strip(),
                 "shipment_details": details["text"],
                 "timeline": timeline_details["text"],
                 "event_log": events["text"],
