@@ -33,11 +33,12 @@ def log_browser_error(error):
     elif "Host system is missing dependencies" in first_line:
         category = "browser_dependencies_missing"
     operation_name = operation.group(0) if operation else "unknown"
+    stage = getattr(error, "tracking_stage", "start_browser")
     print(
-        f"DHL Playwright: operation={operation_name} "
+        f"DHL Playwright: stage={stage} operation={operation_name} "
         f"cause={category}", file=sys.stderr, flush=True,
     )
-    return {"operation": operation_name, "cause": category}
+    return {"stage": stage, "operation": operation_name, "cause": category}
 
 
 def application(environ, start_response):
@@ -47,7 +48,7 @@ def application(environ, start_response):
     path, method = environ["PATH_INFO"], environ["REQUEST_METHOD"]
     ready = len(TOKEN) >= 32
     if path == "/health" and method == "GET":
-        return send("200 OK" if ready else "503 Service Unavailable", {"ok": ready})
+        return send("200 OK" if ready else "503 Service Unavailable", {"ok": ready, "revision": os.getenv("RENDER_GIT_COMMIT")})
     if path != "/track" or method != "POST":
         return send("404 Not Found", {"error": "not_found"})
     if not ready:

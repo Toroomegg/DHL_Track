@@ -2,7 +2,7 @@ import argparse
 import json
 import re
 
-from playwright.sync_api import TimeoutError as BrowserTimeout, sync_playwright
+from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTimeout, sync_playwright
 
 TRACKING_URL = "https://www.dhl.com/tw-zh/home/tracking.html"
 SHIPMENT_MARKER = re.compile(r"處理此貨件由|Handled by", re.I)
@@ -27,8 +27,18 @@ def track(tracking_number, channel=None):
             playwright.chromium.launch(channel=channel)
             if channel else playwright.firefox.launch()
         )
+        stage = "open_tracking_page"
+        overlay = None
         try:
-            page = browser.new_page(locale="zh-TW")
+            page = browser.new_page(locale="zh-TW", viewport={"width": 1440, "height": 1000})
+            cookies = page.locator("#onetrust-reject-all-handler")
+            overlay = page.locator("#sec-overlay")
+
+            def dismiss_cookies(button):
+                if not overlay.is_visible():
+                    button.click(timeout=4_000)
+
+            page.add_locator_handler(cookies, dismiss_cookies, no_wait_after=True)
             page.set_default_timeout(8_000)
             response = page.goto(
                 f"{TRACKING_URL}?tracking-id={tracking_number}",
@@ -37,15 +47,18 @@ def track(tracking_number, channel=None):
             if response and response.status in (403, 429):
                 return {"outcome": "upstream_blocked"}
 
-            cookies = page.locator("#onetrust-reject-all-handler")
-            if cookies.is_visible():
-                cookies.click(timeout=3_000)
-
+            stage = "wait_for_page_overlay"
+            overlay.wait_for(state="hidden", timeout=8_000)
+            stage = "submit_tracking"
             marker = page.get_by_text(SHIPMENT_MARKER).first
-            button = page.get_by_role("button", name=re.compile(r"^(追蹤|Track)$", re.I))
-            if not marker.is_visible() and button.first.is_enabled(timeout=8_000):
-                button.first.click()
+            track_button = page.get_by_role(
+                "button", name=re.compile(r"^(追蹤|Track)$", re.I)
+            ).filter(visible=True).first
+            marker.or_(track_button).first.wait_for(timeout=10_000)
+            if not marker.is_visible() and track_button.is_enabled():
+                track_button.click(timeout=12_000)
 
+            stage = "wait_for_tracking_result"
             try:
                 marker.wait_for(timeout=22_000)
             except BrowserTimeout:
@@ -59,10 +72,7 @@ def track(tracking_number, channel=None):
                     return {"outcome": "upstream_message", "message": " ".join(alerts)}
                 return {"outcome": "tracking_result_unavailable"}
 
-            # The result view can display its own cookie banner after the search.
-            if cookies.is_visible():
-                cookies.click(timeout=4_000)
-
+            stage = "read_shipment_details"
             details_tab = page.get_by_role("tab", name=re.compile("貨物詳情|Shipment Details", re.I))
             details = read_tab_panel(page, details_tab)
             status_heading = page.locator(
@@ -77,8 +87,10 @@ def track(tracking_number, channel=None):
                 }
                 return '';
             }""")
+            stage = "read_timeline"
             timeline = page.get_by_role("tab", name=re.compile("貨物時間線|Shipment Timeline", re.I))
             timeline_text = read_tab_panel(page, timeline, select=True)
+            stage = "read_event_log"
             event_log = page.get_by_role("tab", name=re.compile("事件日誌|Event Log", re.I))
             event_text = ""
             if event_log.is_visible():
@@ -94,6 +106,11 @@ def track(tracking_number, channel=None):
                 "event_log": event_text.strip(),
                 "source_url": f"{TRACKING_URL}?tracking-id={tracking_number}",
             }
+        except BrowserError as error:
+            if isinstance(error, BrowserTimeout) and overlay is not None and overlay.is_visible():
+                return {"outcome": "upstream_blocked", "stage": stage, "cause": "site_overlay"}
+            error.tracking_stage = stage
+            raise
         finally:
             browser.close()
 
