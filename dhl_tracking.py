@@ -36,13 +36,17 @@ def read_tab_panel(page, tab):
 
 def observe_dhl_requests(page):
     calls = {}
+    tracked = {}
 
     def on_request(request):
-        host = urlsplit(request.url).hostname or ""
+        url = urlsplit(request.url)
+        host = url.hostname or ""
         if (request.resource_type in ("fetch", "xhr")
                 and (host == "dhl.com" or host.endswith(".dhl.com"))
                 and len(calls) < 50):
             calls[request] = "pending"
+            if re.search(r"track|shipment", url.path, re.I):
+                tracked[request] = request.method
 
     def on_response(response):
         if response.request in calls:
@@ -63,7 +67,14 @@ def observe_dhl_requests(page):
         for result in calls.values():
             key = str(result)
             counts[key] = counts.get(key, 0) + 1
-        return {"observed_requests": len(calls), "results": counts}
+        return {
+            "observed_requests": len(calls),
+            "results": counts,
+            "tracking_path_responses": [
+                {"method": method, "result": calls[request]}
+                for request, method in tracked.items()
+            ],
+        }
 
     return snapshot
 
